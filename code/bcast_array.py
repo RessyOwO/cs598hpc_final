@@ -78,7 +78,7 @@ def op2name(op: str) -> str:
 
 _kernel_cache: dict[tuple[str, int, np.dtype], callable] = {}
 # make loopy kernel
-def make_kernel(op: str, rank: int, dtype: np.dtype):
+def make_binop_kernel(op: str, rank: int, dtype: np.dtype):
     key = (op, rank, dtype)
     if key in _kernel_cache:
         return _kernel_cache[key]
@@ -100,8 +100,8 @@ def make_kernel(op: str, rank: int, dtype: np.dtype):
     out_strides = tuple(f"out_stride_{rank-1-k}" for k in range(rank))
 
     args = [
-        lp.GlobalArg("a",   dtype=dtype, shape=tuple(dimvars), strides=a_strides),
-        lp.GlobalArg("b",   dtype=dtype, shape=tuple(dimvars), strides=b_strides),
+        lp.GlobalArg("a", dtype=dtype, shape=tuple(dimvars), strides=a_strides),
+        lp.GlobalArg("b", dtype=dtype, shape=tuple(dimvars), strides=b_strides),
         lp.GlobalArg("out", dtype=dtype, shape=tuple(dimvars), strides=out_strides),
     ]
 
@@ -148,8 +148,7 @@ class BcastArray:
     # handmake the array of broadcast shape with buf data and right strides
     def broadcast_view(self, out_shape):
         new_strides = get_bstride(self.shape, self.strides, out_shape)
-        return cl_array.Array(self.queue, out_shape, self.dtype,
-                              data=self.data, strides=new_strides)
+        return cl_array.Array(self.queue, out_shape, self.dtype, data=self.data, strides=new_strides)
 
     # binop function
     def binop(self, other, op: str):
@@ -168,7 +167,7 @@ class BcastArray:
         out = cl_array.empty(self.queue, out_shape, self.dtype)
 
         # get kernel and construct kwargs
-        knl = make_kernel(op, rank, self.dtype)
+        knl = make_binop_kernel(op, rank, self.dtype)
 
         launch = {}
         for name, view in (("a", a_view), ("b", b_view), ("out", out)):
