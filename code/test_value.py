@@ -1,6 +1,20 @@
 import numpy as np
 from bcast_array import BcastArray
 
+OPS = {
+    "+": ("__add__", np.add),
+    "-": ("__sub__", np.subtract),
+    "*": ("__mul__", np.multiply),
+    "/": ("__truediv__", np.divide),
+
+    "<": ("__lt__", np.less),
+    "<=": ("__le__", np.less_equal),
+    "==": ("__eq__", np.equal),
+    ">": ("__gt__", np.greater),
+    ">=": ("__ge__", np.greater_equal),
+    "!=": ("__ne__", np.not_equal),
+}
+
 def single_case():
     A = np.arange(35, dtype=np.float32).reshape(5,1,7)
     B = (100 * np.arange(28, dtype=np.float32)).reshape(1,4,7)
@@ -11,7 +25,7 @@ def single_case():
 
 def small_ops():
     rng = np.random.default_rng(42)
-    ops = {"+": np.add, "-": np.subtract, "*": np.multiply, "/": np.divide}
+    # ops = {"+": np.add, "-": np.subtract, "*": np.multiply, "/": np.divide}
 
     for rank in range(1, 5):
         for _ in range(20):
@@ -29,9 +43,9 @@ def small_ops():
             a_gpu = BcastArray.from_numpy(A)
             b_gpu = BcastArray.from_numpy(B)
 
-            for sym, func in ops.items():
-                res_gpu = getattr(a_gpu, {"+" : "__add__", "-" : "__sub__", "*" : "__mul__", "/": "__div__"}[sym])(b_gpu).get()
-                assert np.allclose(res_gpu, func(A, B), atol=1e-6)
+            for sym, (o, func) in OPS.items():
+                res_gpu = getattr(a_gpu, o)(b_gpu).get()
+                assert np.allclose(res_gpu, func(A, B), atol=1e-6), f"op {sym} failed"
 
 def bigger_ops():
     rng = np.random.default_rng(42)
@@ -53,9 +67,9 @@ def bigger_ops():
             a_gpu = BcastArray.from_numpy(A)
             b_gpu = BcastArray.from_numpy(B)
 
-            for sym, func in ops.items():
-                res_gpu = getattr(a_gpu, {"+" : "__add__", "-" : "__sub__", "*" : "__mul__", "/": "__truediv__"}[sym])(b_gpu).get()
-                assert np.allclose(res_gpu, func(A, B), atol=1e-6)
+            for sym, (o, func) in OPS.items():
+                res_gpu = getattr(a_gpu, o)(b_gpu).get()
+                assert np.allclose(res_gpu, func(A, B), atol=1e-6), f"op {sym} failed"
 
 if __name__ == "__main__":
     print("testing 1 simple case...")
