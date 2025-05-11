@@ -116,6 +116,12 @@ def make_binop_kernel(op: str, rank: int, dtype: np.dtype):
     name = f"bcast_{op2name(op)}_{rank}d"
     knl = lp.make_kernel(domain, out, args, name=name, lang_version=(2018, 2))
 
+    if rank == 1:
+        knl = lp.tag_inames(knl, {"i0": "g.0"})
+    elif rank >= 2:
+        knl = lp.tag_inames(knl, {f"i{rank-1}": "g.0",
+                                  f"i{rank-2}": "g.1"})
+
     _kernel_cache[key] = knl
     return knl
 
