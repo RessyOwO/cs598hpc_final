@@ -3,7 +3,6 @@ import pyopencl as cl
 import pyopencl.array as cl_array
 import loopy as lp
 from numbers import Number
-from collections import OrderedDict
 import re
 
 
@@ -14,6 +13,28 @@ def get_queue():
         ctx = cl.create_some_context()
         global_queue = cl.CommandQueue(ctx)
     return global_queue
+
+# monkey patch at import to override numpy's 32-dim limit
+_orig_broadcast_shapes = np.broadcast_shapes
+def _broadcast_shapes_unlimited(*shapes):
+    def _pairwise(a, b):
+        la, lb = len(a), len(b)
+        out = []
+        for i in range(max(la, lb)):
+            da = a[-1-i] if i < la else 1
+            db = b[-1-i] if i < lb else 1
+            if da == db or da == 1 or db == 1:
+                out.append(max(da, db))
+            else:
+                raise ValueError(f"shapes {a} and {b} are not broadcastable")
+        return tuple(reversed(out))
+
+    res = shapes[0]
+    for s in shapes[1:]:
+        res = _pairwise(res, s)
+    return res
+
+np.broadcast_shapes = _broadcast_shapes_unlimited
 
 # helpers
 # figure out what is the bshape
@@ -34,7 +55,7 @@ def get_bshape(shape_a, shape_b):
 # figure out what is the bstride
 def get_bstride(orig_shape, orig_strides, out_shape):
     pad = len(out_shape) - len(orig_shape)
-    orig_shape   = (1,) * pad + orig_shape
+    orig_shape = (1,) * pad + orig_shape
     orig_strides = (0,) * pad + orig_strides
 
     new = [0 if (s==1 and o>1) else st for s, st, o in zip(orig_shape, orig_strides, out_shape)]
@@ -52,17 +73,52 @@ def _op2name(op: str) -> str:
         "/": "div",
     }.get(op, re.sub(r"\W|^(?=\d)", "_", op))
 
+_kernel_cache: dict[tuple[str, int, np.dtype], callable] = {}
 # make loopy kernel
 def _get_kernel(op: str, rank: int, dtype: np.dtype):
-    # TODO: make loopy kernel
-    return
+    key = (op, rank, dtype)
+    if key in _kernel_cache:
+        return _kernel_cache[key]
+
+    # build index names and domain
+    dims = [f"i{k}"  for k in range(rank)]
+    dimvars = [f"n{k}"  for k in range(rank)]
+    dom_idxs = ",".join(dims)
+    dom_conds= " and ".join(f"0<={d}<{v}" for d, v in zip(dims, dimvars))
+    domain = f"{{[{dom_idxs}]: {dom_conds}}}"
+
+    # compute out
+    out = f"out[{dom_idxs}] = a[{dom_idxs}] {op} b[{dom_idxs}]"
+
+    # arguments
+    # for each array we accept data pointer + strides for the axis
+    a_strides = tuple(f"a_stride_{rank-1-k}" for k in range(rank))
+    b_strides = tuple(f"b_stride_{rank-1-k}" for k in range(rank))
+    out_strides = tuple(f"out_stride_{rank-1-k}" for k in range(rank))
+
+    args = [
+        lp.GlobalArg("a",   dtype=dtype, shape=tuple(dimvars), strides=a_strides),
+        lp.GlobalArg("b",   dtype=dtype, shape=tuple(dimvars), strides=b_strides),
+        lp.GlobalArg("out", dtype=dtype, shape=tuple(dimvars), strides=out_strides),
+    ]
+
+    # valueargs for each stride and dim
+    for arr in ("a", "b", "out"):
+        for i in range(rank):
+            args.append(lp.ValueArg(f"{arr}_stride_{i}", np.int32))
+    for i in range(rank):
+        args.append(lp.ValueArg(f"n{i}", np.int32))
+
+    # build and cache kernel
+    name = f"bcast_{_op2name(op)}_{rank}d"
+    knl = lp.make_kernel(domain, out, args, name=name, lang_version=(2018, 2))
+
+    _kernel_cache[key] = knl
+    return knl
 
 # convert byte strides (numpy/cl) to element strides (loopy)
 def _as_elem_strides(byte_strides: tuple[int], itemsize: int) -> tuple[int]:
-    """Convert NumPy/CL byte-strides ➜ element-strides expected by Loopy."""
     return tuple(0 if s == 0 else s // itemsize for s in byte_strides)
-
-
 
 
 class BcastArray:
@@ -113,7 +169,7 @@ class BcastArray:
 
         launch = {}
         for name, view in (("a", a_view), ("b", b_view), ("out", out)):
-            launch[name] = view.data
+            launch[name] = view
             elt_strides = _as_elem_strides(view.strides, self.dtype.itemsize)
             for ax, st in enumerate(elt_strides):
                 launch[f"{name}_stride_{rank-1-ax}"] = np.int32(st)
@@ -128,4 +184,4 @@ class BcastArray:
     def __add__(self, other): return self.binop(other, "+")
     def __sub__(self, other): return self.binop(other, "-")
     def __mul__(self, other): return self.binop(other, "*")
-    def __truediv__(self, other): return self.binop(other, "/")
+    def __div__(self, other): return self.binop(other, "/")
